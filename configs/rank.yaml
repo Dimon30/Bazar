@@ -1,0 +1,32 @@
+project_name: bazar-ml
+task: rank
+
+paths:
+  raw_csv: data/raw/train_rank.csv
+  train_csv: data/processed/train_rank.csv
+  test_csv: data/processed/test_rank.csv
+  artifacts_dir: artifacts/rank
+
+split:
+  test_size: 0.2
+  random_state: 30
+
+features:
+  text:
+    max_desc_words: 80
+    max_bullet_words: 40
+
+  tfidf:
+    max_features: 20000
+    ngram_range: [1, 2]
+
+model:
+  iterations: 200
+  learning_rate: 0.1
+  depth: 8
+  loss_function: YetiRank
+  eval_metric: NDCG:top=10
+  random_seed: 42
+  task_type: CPU
+  verbose: 100
+

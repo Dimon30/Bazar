@@ -1,0 +1,11 @@
+environment: local
+
+database:
+  type: sqlite
+  path: data/prod/bazar.db
+
+logging:
+  level: INFO
+
+artifacts:
+  root: artifacts
