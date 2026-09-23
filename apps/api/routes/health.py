@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 
 router = APIRouter()
@@ -17,5 +17,5 @@ def root() -> dict[str, str]:
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
-    return health_response()
+def health(request: Request) -> dict[str, str | bool]:
+    return {**health_response(), "retrieval_ready": request.app.state.retrieval_runtime.ready}

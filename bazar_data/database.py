@@ -1,97 +1,77 @@
-import sqlite3
-from pathlib import Path
-from logging import getLogger
+"""Small SQLAlchemy gateway used by CLI, API and offline jobs."""
+
+from __future__ import annotations
+
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator, Sequence
 
 import pandas as pd
+from sqlalchemy import Engine, Table, create_engine, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
-logger = getLogger(__name__)
+from bazar_data.marketplace_schema import metadata
 
-""" USING:
-db = Database("data/prod/bazar.db")
-
-db.execute('''
-CREATE TABLE IF NOT EXISTS products (
-    product_id INTEGER PRIMARY KEY,
-    title TEXT,
-    price REAL
-)
-''')
-
-db.execute(
-    "INSERT INTO products(title, price) VALUES (?, ?)",
-    ("iPhone", 1000)
-)
-
-rows = db.fetch_all(
-    "SELECT * FROM products"
-)
-
-print(rows)
-
---------------------------------------------------------
-
-products_df = db.read_dataframe(
-    "SELECT * FROM products"
-)
-
-db.write_dataframe(
-    interactions_df,
-    "user_events"
-)
-"""
 
 class Database:
-    def __init__(self, db_path: str | Path):
-        self.db_path = str(db_path)
+    """Database URL wrapper with portable schema creation and idempotent writes.
+
+    A filesystem path remains accepted for local notebooks; production uses a
+    SQLAlchemy URL such as ``postgresql+psycopg://bazar:bazar@db:5432/bazar``.
+    """
+
+    def __init__(self, url_or_path: str | Path):
+        raw = str(url_or_path)
+        if "://" in raw:
+            self.url = raw
+        else:
+            path = Path(raw)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.url = f"sqlite:///{path}"
+        self.engine: Engine = create_engine(self.url, pool_pre_ping=True)
 
     @contextmanager
-    def connection(self):
-        conn = sqlite3.connect(self.db_path)
-
-        try:
+    def connection(self) -> Iterator[Connection]:
+        with self.engine.begin() as conn:
             yield conn
-            conn.commit()
-            logger.info(f"Connection to {self.db_path} successful")
-        finally:
-            conn.close()
 
-    def execute(self, query: str, params: tuple = ()) -> None:
-        with self.connection() as conn:
-            conn.execute(query, params)
+    def create_schema(self) -> None:
+        metadata.create_all(self.engine)
 
-    def fetch_one(self, query: str, params: tuple = ()) -> tuple | None:
+    def execute(self, query: str, params: dict[str, Any] | None = None) -> None:
         with self.connection() as conn:
-            cursor = conn.execute(query, params)
-            logger.info(f"Fetching {query} successful")
-            return cursor.fetchone()
+            conn.execute(text(query), params or {})
 
-    def fetch_all(self, query: str, params: tuple = ()) -> list[tuple]:
+    def fetch_one(self, query: str, params: dict[str, Any] | None = None) -> tuple[Any, ...] | None:
         with self.connection() as conn:
-            cursor = conn.execute(query, params)
-            logger.info(f"Fetching {query} successful")
-            return cursor.fetchall()
-        logger.error(f"Fetching {query} failed")
+            row = conn.execute(text(query), params or {}).first()
+            return tuple(row) if row is not None else None
 
-    def read_dataframe(self, query: str) -> pd.DataFrame:
+    def fetch_all(self, query: str, params: dict[str, Any] | None = None) -> list[tuple[Any, ...]]:
         with self.connection() as conn:
-            df = pd.read_sql_query(query, conn)
-            logger.info(f"Reading {query} successful")
-            return df
-        logger.error(f"Reading {query} failed")
+            return [tuple(row) for row in conn.execute(text(query), params or {}).all()]
 
-    def write_dataframe(
-            self,
-            df: pd.DataFrame,
-            table_name: str,
-            if_exists: str = "append",
-    ) -> None:
+    def read_dataframe(self, query: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+        with self.engine.connect() as conn:
+            return pd.read_sql_query(text(query), conn, params=params or {})
+
+    def write_dataframe(self, df: pd.DataFrame, table_name: str, if_exists: str = "append") -> None:
+        with self.engine.begin() as conn:
+            df.to_sql(table_name, conn, if_exists=if_exists, index=False)
+
+    def upsert(self, table: Table, rows: Sequence[dict[str, Any]], *, key_columns: tuple[str, ...]) -> None:
+        """Portable insert-or-update without silently losing a batch on conflict."""
+        if not rows:
+            return
+        update_columns = [column.name for column in table.columns if column.name not in key_columns and column.name != "ingested_at"]
         with self.connection() as conn:
-            df.to_sql(
-                table_name,
-                conn,
-                if_exists=if_exists,
-                index=False,
-            )
-            logger.info(f"Writing {table_name} successful")
-        # logger.error(f"Writing {table_name} failed")
+            for row in rows:
+                where = {key: row[key] for key in key_columns}
+                values = {column: row[column] for column in update_columns if column in row}
+                result = conn.execute(table.update().where(*[table.c[key] == value for key, value in where.items()]).values(**values))
+                if result.rowcount == 0:
+                    try:
+                        conn.execute(table.insert().values(**row))
+                    except IntegrityError:
+                        conn.execute(table.update().where(*[table.c[key] == value for key, value in where.items()]).values(**values))

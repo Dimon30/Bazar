@@ -1,0 +1,12 @@
+.git
+.idea
+.venv
+.venv_depr
+__pycache__
+*.py[cod]
+data
+artifacts
+mlruns
+tests
+legacy
+AGENTS.md

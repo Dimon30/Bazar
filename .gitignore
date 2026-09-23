@@ -63,6 +63,7 @@ logs/
 # Local config / secrets
 .env
 .env.*
+!.env.example
 *.local
 
 # IDE / editors
